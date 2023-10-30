@@ -1,270 +1,245 @@
 # models.py
 
-from sentiment_data import *
-from utils import *
-
-from collections import Counter
+import torch
+import torch.nn as nn
+from torch import optim
 import numpy as np
-from nltk.corpus import stopwords
-import math
 import random
-stop_words = set(stopwords.words('english'))
-some_punkt = ('.', ',', '...', '?', '\'', '!', ':', ';')
+from sentiment_data import *
 
-class FeatureExtractor(object):
-    """
-    Feature extraction base type. Takes a sentence and returns an indexed list of features.
-    """
-    def get_indexer(self):
-        raise Exception("Don't call me, call my subclasses")
 
-    def extract_features(self, sentence: List[str], add_to_indexer: bool=False) -> Counter:
+
+class FFNN(nn.Module):
+    """
+    From exmaple Fnn code
+    Defines the core neural network for doing multiclass classification over a single datapoint at a time. This consists
+    of matrix multiplication, tanh nonlinearity, another matrix multiplication, and then
+    a log softmax layer to give the ouputs. Log softmax is numerically more stable. If you take a softmax over
+    [-100, 100], you will end up with [0, 1], which if you then take the log of (to compute log likelihood) will
+    break.
+
+    The forward() function does the important computation. The backward() method is inherited from nn.Module and
+    handles backpropagation.
+    """
+
+    def __init__(self, word_embeddings=None, inp=50, hid=32, out=2):
         """
-        Extract features from a sentence represented as a list of words. Includes a flag add_to_indexer to
-        :param sentence: words in the example to featurize
-        :param add_to_indexer: True if we should grow the dimensionality of the featurizer if new features are encountered.
-        At test time, any unseen features should be discarded, but at train time, we probably want to keep growing it.
-        :return: A feature vector. We suggest using a Counter[int], which can encode a sparse feature vector (only
-        a few indices have nonzero value) in essentially the same way as a map. However, you can use whatever data
-        structure you prefer, since this does not interact with the framework code.
+        Constructs the computation graph by instantiating the various layers and initializing weights.
+
+        :param inp: size of input (integer)
+        :param hid: size of hidden layer(integer)
+        :param out: size of output (integer), which should be the number of classes
         """
-        raise Exception("Don't call me, call my subclasses")
 
+        super(FFNN, self).__init__()
+        if word_embeddings is not None:
+            self.word_embeddings = nn.Embedding.from_pretrained(torch.from_numpy(word_embeddings.vectors),freeze=False)
+        #self.embeddings = word_embeddings.get_initialized_embedding_layer()
+       # self.word_embeddings.weight.requires_grad = False
+        self.V = nn.Linear(inp, hid)
+        self.V2 = nn.Linear(hid, hid)
+        # self.g = nn.Tanh()
+        self.g = nn.ReLU()
+        self.W = nn.Linear(hid, out)
+        self.dropout = nn.Dropout(0.25)
+        # Initialize weights according to a formula due to Xavier Glorot.
+        nn.init.xavier_uniform_(self.V.weight)
+        nn.init.xavier_uniform_(self.W.weight)
+        self.loss_function = nn.CrossEntropyLoss()
 
-class UnigramFeatureExtractor(FeatureExtractor):
-    """
-    Extracts unigram bag-of-words features from a sentence. It's up to you to decide how you want to handle counts
-    and any additional preprocessing you want to do.
-    """
-    def __init__(self, indexer: Indexer):
-        self.indexer = indexer
-      
-    def get_indexer(self):
-        return self.indexer
-    def add_vocab(self,ex_words):
-    #   indexer = Indexer()
+    def forward(self, x):
+        """
+        Runs the neural network on the given data and returns log probabilities of the various classes.
 
-        for ex in ex_words:
-            for word in ex.words:
-                if word.lower() not in stop_words and word.lower() not in some_punkt: #sET ADDITIONAL CONSIDERATION
-                    self.indexer.add_and_get_index(word.lower())
-        return self.indexer
-    def extract_features(self, ex_words: List[str], add_to_indexer: bool) -> List[int]:
-        features_of_str = np.zeros(self.indexer.__len__())
-        for ele in ex_words:
-            if self.indexer.contains(ele.lower()):
-                features_of_str[self.indexer.index_of(ele.lower())] += 1
-        return features_of_str
-
-
-class BigramFeatureExtractor(FeatureExtractor):
-    """
-    Bigram feature extractor analogous to the unigram one.
-    """
-    def __init__(self, indexer: Indexer):
-        self.indexer = indexer
-
-    def get_indexer(self):
-        return self.indexer
+        :param x: a [inp]-sized tensor of input data; this is the sentence tensor.
+        :return: an [out]-sized tensor of log probabilities. (In general your network can be set up to return either log
+        probabilities or a tuple of (loss, log probability) if you want to pass in y to this function as well
+        """
+      #  if self.word_embeddings is not None :
+           
+          
+        mean = torch.mean(self.word_embeddings(x), dim=1, keepdim=False).float()
         
-    def add_vocab(self,ex_words):
-      
-        # Generate vocabulary
-        for ex in ex_words:
-            for i in range(0, len(ex.words) - 1):
-                if stop_words.__contains__(ex.words[i]) and stop_words.__contains__(ex.words[i + 1]) or (
-                        some_punkt.__contains__(ex.words[i]) or some_punkt.__contains__(ex.words[i + 1])):
-                    continue
-                bigram = ex.words[i] + ' ' + ex.words[i + 1]
-                self.indexer.add_and_get_index(bigram.lower())
-        return self.indexer
-    def extract_features(self, ex_words: List[str], add_to_indexer: bool) -> List[int]:
-        features_of_str = np.zeros(self.indexer.__len__(), dtype=int)
-        for i in range(0, len(ex_words) - 1):
-            bigram = ex_words[i] + ' ' + ex_words[i + 1]
-            if self.indexer.contains(bigram.lower()):
-                index = self.indexer.index_of(bigram.lower())
-                features_of_str[index] += 1
-        return features_of_str
+        return self.W(self.g(self.V2(self.g(self.V(mean)))))
+     #   else:
+      #      return self.W(self.g(self.V(x)))
 
-class BetterFeatureExtractor(FeatureExtractor):
-    """
-    Better feature extractor...try whatever you can think of!
-    """
-    def __init__(self, indexer: Indexer):
-        self.indexer = indexer
-
-    def add_vocab(self,ex_words):
-        cnt = Counter()
-        for ex in ex_words:
-            cnt.update(
-                word.lower() for word in ex.words if word.lower() not in stop_words and word.lower() not in some_punkt)
-        cnt = dict(cnt.most_common(int(cnt.__len__() * 0.5)))
-        for keys in cnt.keys():
-            self.indexer.add_and_get_index(keys)
-
-        return self.indexer
-
-
-
-
-    def get_indexer(self):
-        return self.indexer
-
-    def extract_features(self, ex_words: List[str], add_to_indexer: bool) -> List[int]:
-        features_of_str = np.zeros(self.indexer.__len__())
-        for ele in ex_words:
-            if self.indexer.contains(ele.lower()):
-                features_of_str[self.indexer.index_of(ele.lower())] += 1
-        return features_of_str
 
 
 class SentimentClassifier(object):
     """
     Sentiment classifier base type
     """
-    def predict(self, sentence: List[str]) -> int:
+
+    def predict(self, ex_words: List[str], has_typos: bool) -> int:
         """
-        :param sentence: words (List[str]) in the sentence to classify
-        :return: Either 0 for negative class or 1 for positive class
+        Makes a prediction on the given sentence
+        :param ex_words: words to predict on
+        :param has_typos: True if we are evaluating on data that potentially has typos, False otherwise. If you do
+        spelling correction, this parameter allows you to only use your method for the appropriate dev eval in Q3
+        and not otherwise
+        :return: 0 or 1 with the label
         """
         raise Exception("Don't call me, call my subclasses")
 
+    def predict_all(self, all_ex_words: List[List[str]], has_typos: bool) -> List[int]:
+        """
+        You can leave this method with its default implementation, or you can override it to a batched version of
+        prediction if you'd like. Since testing only happens once, this is less critical to optimize than training
+        for the purposes of this assignment.
+        :param all_ex_words: A list of all exs to do prediction on
+        :param has_typos: True if we are evaluating on data that potentially has typos, False otherwise.
+        :return:
+        """
+        return [self.predict(ex_words, has_typos) for ex_words in all_ex_words]
+
 
 class TrivialSentimentClassifier(SentimentClassifier):
-    """
-    Sentiment classifier that always predicts the positive class.
-    """
-    def predict(self, sentence: List[str]) -> int:
+    def predict(self, ex_words: List[str], has_typos: bool) -> int:
+        """
+        :param ex:
+        :return: 1, always predicts positive class
+        """
         return 1
 
 
-class PerceptronClassifier(SentimentClassifier):
+class NeuralSentimentClassifier(SentimentClassifier):
     """
-    Implement this class -- you should at least have init() and implement the predict method from the SentimentClassifier
-    superclass. Hint: you'll probably need this class to wrap both the weight vector and featurizer -- feel free to
-    modify the constructor to pass these in.
+    Implement your NeuralSentimentClassifier here. This should wrap an instance of the network with learned weights
+    along with everything needed to run it on new data (word embeddings, etc.). You will need to implement the predict
+    method and you can optionally override predict_all if you want to use batching at inference time (not necessary,
+    but may make things faster!)
     """
-    def __init__(self, weights: np.ndarray, feat_extractor: FeatureExtractor):
-        self.weights = weights
-        self.feat_extractor = feat_extractor
+    def __init__(self, word_embeddings: WordEmbeddings):
+        SentimentClassifier.__init__(self)
+        self.word_embeddings = word_embeddings
+   
+        self.indexer = word_embeddings.word_indexer
+        self.input = self.word_embeddings.get_embedding_length()
+        self.hidden = 256
+        self.output = 2
+        self.loss = nn.CrossEntropyLoss()
+        self.model = FFNN(word_embeddings, self.input, self.hidden, self.output)
 
-    def predict(self, ex_words: List[str]) -> int:
-        features_of_str = self.feat_extractor.extract_features(ex_words, False)
-        possibility = np.dot(self.weights, features_of_str)
-        #possibility = expo / (1 + expo)
-        if possibility > 0.0:
-            return 1
-        return 0
+    def predict(self, ex_words: List[str],has_typos: bool):
+        '''
 
-class LogisticRegressionClassifier(SentimentClassifier):
+        Args:
+            ex_words: the sentence, a list of strings, or words in the sentence
+
+        Returns:
+
+        '''
+        words_idx=[]
+        for word in ex_words:
+          
+
+            words_idx.append(max(1, self.indexer.index_of(word)))
+        
+        words_tensor=torch.tensor([words_idx])
+    
+        y_probs = self.model.forward(words_tensor)
+        return torch.argmax(y_probs)
+    def loss(self, probs, target):
+        return self.loss(probs, target)
+class PrefixEmbeddings:
     """
-    Implement this class -- you should at least have init() and implement the predict method from the SentimentClassifier
-    superclass. Hint: you'll probably need this class to wrap both the weight vector and featurizer -- feel free to
-    modify the constructor to pass these in.
+    Use wordembeddings
+    Wraps an Indexer and a list of 1-D numpy arrays where each position in the list is the vector for the corresponding
+    word in the indexer. The 0 vector is returned if an unknown word is queried.
     """
-    def __init__(self, weights: np.ndarray, feat_extractor: FeatureExtractor):
-        self.weights = weights
-        self.feat_extractor = feat_extractor
+    def __init__(self, word_indexer, vectors):
+        self.word_indexer = word_indexer
+        self.vectors = vectors
 
-    def predict(self, ex_words: List[str]) -> int:
-        features_of_str = self.feat_extractor.extract_features(ex_words, False)
-        exponantial= math.exp(np.dot(self.weights, features_of_str))
-        possibility =  exponantial / (1 + exponantial)
-        if possibility > 0.5:
-            return 1
-        return 0
+    def get_embedding_length(self):
+        return len(self.vectors[0])
 
 
-def train_perceptron(train_exs: List[SentimentExample], feat_extractor: FeatureExtractor) -> PerceptronClassifier:
+
+def train_deep_averaging_network(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample],
+                                 word_embeddings: WordEmbeddings, train_model_for_typo_setting: bool) -> NeuralSentimentClassifier:
     """
-    Train a classifier with the perceptron.
-    :param train_exs: training set, List of SentimentExample objects
-    :param feat_extractor: feature extractor to use
-    :return: trained PerceptronClassifier model
+    :param args: Command-line args so you can access them here
+    :param train_exs: training examples
+    :param dev_exs: development set, in case you wish to evaluate your model during training
+    :param word_embeddings: set of loaded word embeddings
+    :param train_model_for_typo_setting: True if we should train the model for the typo setting, False otherwise
+    :return: A trained NeuralSentimentClassifier model. Note: you can create an additional subclass of SentimentClassifier
+    and return an instance of that for the typo setting if you want; you're allowed to return two different model types
+    for the two settings.
     """
-    indexer=feat_extractor.add_vocab(train_exs)
+   
 
-    indexer = feat_extractor.get_indexer()
-    weights = np.transpose(np.zeros(indexer.__len__(), dtype=int))
-    learning_rate = .2
-    for i in range(20):
-        random.shuffle(train_exs)
-        for ex in train_exs:
-            features_of_str = feat_extractor.extract_features(ex.words, False)
+   
+    epochs = 15
+    pad_size = 50
+    batch_size = 200
+
+    if train_model_for_typo_setting:
+     
+        classify = NeuralSentimentClassifier(PrefixEmbeddings(word_embeddings.word_indexer, word_embeddings.vectors))
+    else:
+       
+        classify = NeuralSentimentClassifier(word_embeddings)
+    word_indices = {}
+    for i in range(len(train_exs)):
+        words = train_exs[i].words
+      
+        index_list = []
+        for word in words:
+          
+            idx = classify.indexer.index_of(word)
            
-            if np.dot(weights, features_of_str)>0:
-                possibility=1
+            index_list.append(max(idx, 1))
+       
+        word_indices[i] = index_list
+      
+
+
+    initial_learning_rate = 0.001
+    optimizer = optim.Adam(classify.model.parameters(), lr=initial_learning_rate)
+   
+    train_indices = [idx for idx in range(0,len(train_exs))]
+    
+    for epoch in range(epochs):
+        random.shuffle(train_indices)
+ 
+        batch_x = []
+        batch_y = []
+        total_loss = 0.0
+        for idx in train_indices:
+            if len(batch_x) < batch_size:
+
+                sent_pad = [0]*pad_size
+                sent = word_indices[idx]
+              
+                sent_pad[:min(pad_size,len(sent))]=sent[:min(pad_size,len(sent))]
+                batch_x.append(sent_pad)
+               
+                target = train_exs[idx].label
+                batch_y.append(target)
             else:
-                possibility=0
-            
-            if (possibility)==(ex.label):
-                weights=weights
-            elif (possibility==1) and (ex.label==0):
-                weights = np.subtract(weights, np.dot(learning_rate, features_of_str))
-            elif (possibility==0) and (ex.label==1):
-                weights = np.add(weights, np.dot(learning_rate, features_of_str))
+                classify.model.train()
+                optimizer.zero_grad()
                 
+                batch_x = torch.tensor(batch_x)
+              
+                probs =  classify.model.forward(batch_x)
+                target = torch.tensor(batch_y)
+                
+                loss = classify.loss(probs, target)
+             
+                total_loss += loss
+                
+                loss.backward()
+                
+                optimizer.step()
+                batch_x = []
+                batch_y = []
 
-    return PerceptronClassifier(weights, feat_extractor)
+        total_loss /= len(train_exs)
 
+        print("Total loss on epoch %i: %f" % (epoch, total_loss))
+    return classify
 
-def train_logistic_regression(train_exs: List[SentimentExample], feat_extractor: FeatureExtractor) -> LogisticRegressionClassifier:
-    """
-    Train a logistic regression model.
-    :param train_exs: training set, List of SentimentExample objects
-    :param feat_extractor: feature extractor to use
-    :return: trained LogisticRegressionClassifier model
-    """
-    indexer=feat_extractor.add_vocab(train_exs)
-
-    indexer = feat_extractor.get_indexer()
-    weights = np.transpose(np.zeros(indexer.__len__(), dtype=int))
-    learning_rate = .5
-    for i in range(15):
-        random.shuffle(train_exs)
-        for ex in train_exs:
-            features_of_str = feat_extractor.extract_features(ex.words, False)
-            exponantial = math.exp(np.dot(weights, features_of_str))
-            possibility =  exponantial / (1 + exponantial)
-            gradient_of_w = np.dot(ex.label - possibility, features_of_str)
-            weights = np.add(weights, np.dot(learning_rate, gradient_of_w))
-    return LogisticRegressionClassifier(weights, feat_extractor)
-
-
-
-def train_model(args, train_exs: List[SentimentExample], dev_exs: List[SentimentExample]) -> SentimentClassifier:
-    """
-    Main entry point for your modifications. Trains and returns one of several models depending on the args
-    passed in from the main method. You may modify this function, but probably will not need to.
-    :param args: args bundle from sentiment_classifier.py
-    :param train_exs: training set, List of SentimentExample objects
-    :param dev_exs: dev set, List of SentimentExample objects. You can use this for validation throughout the training
-    process, but you should *not* directly train on this data.
-    :return: trained SentimentClassifier model, of whichever type is specified
-    """
-    # Initialize feature extractor
-    if args.model == "TRIVIAL":
-        feat_extractor = None
-    elif args.feats == "UNIGRAM":
-        # Add additional preprocessing code here
-        feat_extractor = UnigramFeatureExtractor(Indexer())
-    elif args.feats == "BIGRAM":
-        # Add additional preprocessing code here
-        feat_extractor = BigramFeatureExtractor(Indexer())
-    elif args.feats == "BETTER":
-        # Add additional preprocessing code here
-        feat_extractor = BetterFeatureExtractor(Indexer())
-    else:
-        raise Exception("Pass in UNIGRAM, BIGRAM, or BETTER to run the appropriate system")
-
-    # Train the model
-    if args.model == "TRIVIAL":
-        model = TrivialSentimentClassifier()
-    elif args.model == "PERCEPTRON":
-        model = train_perceptron(train_exs, feat_extractor)
-    elif args.model == "LR":
-        model = train_logistic_regression(train_exs, feat_extractor)
-    else:
-        raise Exception("Pass in TRIVIAL, PERCEPTRON, or LR to run the appropriate system")
-    return model

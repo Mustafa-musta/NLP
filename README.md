@@ -1,4 +1,5 @@
 # NLP
 Sentiment Analysis
 a1: Logistic Regression and Perceptron Application
-     Deep averaging network.
+a2: Deep averaging network.
+a3: Using Transformers
